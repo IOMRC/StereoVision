@@ -138,7 +138,7 @@ class StereoCalibration(object):
             new_frames.append(cv2.remap(frames[i],
                                         self.undistortion_map[side],
                                         self.rectification_map[side],
-                                        cv2.INTER_NEAREST))
+                                        cv2.INTER_CUBIC))
         return new_frames
 
 
@@ -146,16 +146,24 @@ class StereoCalibrator(object):
 
     """A class that calibrates stereo cameras by finding chessboard corners."""
 
-    def _get_corners(self, image):
+    def _get_corners(self, image, target='chess', blobDetector=None):
         """Find subpixel chessboard corners in image."""
         temp = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-        ret, corners = cv2.findChessboardCorners(temp,
-                                                 (self.rows, self.columns))
-        if not ret:
-            raise ChessboardNotFoundError("No chessboard could be found.")
-        cv2.cornerSubPix(temp, corners, (11, 11), (-1, -1),
-                         (cv2.TERM_CRITERIA_MAX_ITER + cv2.TERM_CRITERIA_EPS,
-                          30, 0.01))
+        if target == 'chess':
+            ret, corners = cv2.findChessboardCorners(temp,
+                                                    (self.rows, self.columns))
+            if not ret:
+                raise ChessboardNotFoundError("No chessboard could be found.")
+            cv2.cornerSubPix(temp, corners, (11, 11), (-1, -1),
+                            (cv2.TERM_CRITERIA_MAX_ITER + cv2.TERM_CRITERIA_EPS,
+                            30, 0.01))
+        elif target == 'circle':
+            ret, corners = cv2.findCirclesGrid(temp, (self.rows, self.columns),blobDetector=blobDetector)
+            if not ret:
+                raise ChessboardNotFoundError("No circle grid could be found.")
+        else:
+            raise ValueError("Invalid target type specified: " + target)
+
         return corners
 
     def _show_corners(self, image, corners):
@@ -198,7 +206,7 @@ class StereoCalibrator(object):
         #: and right camera, respectively
         self.image_points = {"left": [], "right": []}
 
-    def add_corners(self, image_pair, show_results=False):
+    def add_corners(self, image_pair, show_results=False, target='chess', blobDetector=None):
         """
         Record chessboard corners found in an image pair.
 
@@ -206,13 +214,19 @@ class StereoCalibrator(object):
         (left, right).
         """
         side = "left"
-        self.object_points.append(self.corner_coordinates)
+        
+        # successfully find corners in both images before adding
+        temp_corners = {}
         for image in image_pair:
-            corners = self._get_corners(image)
+            corners = self._get_corners(image, target=target, blobDetector=blobDetector)
             if show_results:
                 self._show_corners(image, corners)
-            self.image_points[side].append(corners.reshape(-1, 2))
+            temp_corners[side]=corners
             side = "right"
+        
+        self.object_points.append(self.corner_coordinates)
+        for side in ['left','right']:
+            self.image_points[side].append(temp_corners[side].reshape(-1, 2))
             self.image_count += 1
 
     def calibrate_cameras(self):
@@ -225,18 +239,18 @@ class StereoCalibrator(object):
         (calib.cam_mats["left"], calib.dist_coefs["left"],
          calib.cam_mats["right"], calib.dist_coefs["right"],
          calib.rot_mat, calib.trans_vec, calib.e_mat,
-         calib.f_mat) = cv2.stereoCalibrate(self.object_points,
-                                            self.image_points["left"],
-                                            self.image_points["right"],
-                                            self.image_size,
-                                            calib.cam_mats["left"],
-                                            calib.dist_coefs["left"],
-                                            calib.cam_mats["right"],
-                                            calib.dist_coefs["right"],
-                                            calib.rot_mat,
-                                            calib.trans_vec,
-                                            calib.e_mat,
-                                            calib.f_mat,
+         calib.f_mat) = cv2.stereoCalibrate(objectPoints=self.object_points,
+                                            imagePoints1=self.image_points["left"],
+                                            imagePoints2=self.image_points["right"],
+                                            cameraMatrix1=calib.cam_mats["left"],
+                                            distCoeffs1=calib.dist_coefs["left"],
+                                            cameraMatrix2=calib.cam_mats["right"],
+                                            distCoeffs2=calib.dist_coefs["right"],
+                                            imageSize=self.image_size,
+                                            R=calib.rot_mat,
+                                            T=calib.trans_vec,
+                                            E=calib.e_mat,
+                                            F=calib.f_mat,
                                             criteria=criteria,
                                             flags=flags)[1:]
         (calib.rect_trans["left"], calib.rect_trans["right"],
@@ -261,12 +275,12 @@ class StereoCalibrator(object):
                                                         cv2.CV_32FC1)
         # This is replaced because my results were always bad. Estimates are
         # taken from the OpenCV samples.
-        width, height = self.image_size
-        focal_length = 0.8 * width
-        calib.disp_to_depth_mat = np.float32([[1, 0, 0, -0.5 * width],
-                                              [0, -1, 0, 0.5 * height],
-                                              [0, 0, 0, -focal_length],
-                                              [0, 0, 1, 0]])
+        # width, height = self.image_size
+        # focal_length = 0.8 * width
+        # calib.disp_to_depth_mat = np.float32([[1, 0, 0, -0.5 * width],
+        #                                       [0, -1, 0, 0.5 * height],
+        #                                       [0, 0, 0, -focal_length],
+        #                                       [0, 0, 1, 0]])
         return calib
 
     def check_calibration(self, calibration):
@@ -301,5 +315,5 @@ class StereoCalibrator(object):
                                    lines[other_side][i][0][1] +
                                    lines[other_side][i][0][2])
             other_side, this_side = sides
-        total_points = self.image_count * len(self.object_points)
+        total_points = self.image_count * len(self.object_points[0])
         return total_error / total_points
